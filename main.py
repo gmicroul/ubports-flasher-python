@@ -10,16 +10,18 @@ import urllib.request
 import urllib.error
 import subprocess
 import signal
+import shutil
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QScrollArea, QProgressBar,
     QListWidget, QListWidgetItem, QStackedWidget, QFrame, QSpacerItem,
-    QSizePolicy, QProgressDialog, QLayout
+    QSizePolicy, QProgressDialog, QLayout, QScroller
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPoint, QRectF
 from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QPalette, \
     QLinearGradient, QBrush, QFontDatabase
+from _firmware_config import DEVICE_FIRMWARE_URLS, DEVICE_FIRMWARE
 
 # ===== 配置 =====
 BASE_URL = "https://system-image.ubports.com"
@@ -134,7 +136,7 @@ class NavLabel(QPushButton):
                 text-align: left;
                 padding: 16px 40px;
                 border: none;
-                border-radius: 12px;
+                border-radius: 18px;
                 margin: 2px 12px;
             }}
             QPushButton:hover {{
@@ -221,13 +223,13 @@ def apply_dark_theme(app):
         QListWidget::item:selected {{ background: {Theme.ACCENT_LIGHT}; }}
         QScrollBar:vertical {{
             background: {Theme.BG_DARK};
-            width: 8px;
+            width: 96px;
             border: none;
         }}
         QScrollBar::handle:vertical {{
             background: {Theme.BORDER};
-            border-radius: 4px;
-            min-height: 40px;
+            border-radius: 18px;
+            min-height: 96px;
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         QProgressBar {{
@@ -331,7 +333,7 @@ class PrimaryButton(QPushButton):
                 font-size: 34px;
                 font-weight: bold;
                 padding: 16px 32px;
-                border-radius: 12px;
+                border-radius: 18px;
                 border: none;
                 text-align: left;
             }}
@@ -454,13 +456,27 @@ class DeviceCard(QFrame):
 
         layout.addLayout(info_layout, stretch=1)
         self.setLayout(layout)
+        self._press_pos = None
+        self._dragged = False
 
     def mousePressEvent(self, event):
-        self.clicked.emit(self.device_data)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.position().toPoint()
+            self._dragged = False
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        if self._press_pos is not None and not self._dragged:
+            if (event.position().toPoint() - self._press_pos).manhattanLength() > QApplication.startDragDistance():
+                self._dragged = True
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
-        self.clicked.emit(self.device_data)
+        if event.button() == Qt.MouseButton.LeftButton and self._press_pos is not None:
+            if not self._dragged and self.rect().contains(event.position().toPoint()):
+                self.clicked.emit(self.device_data)
+        self._press_pos = None
+        self._dragged = False
         super().mouseReleaseEvent(event)
 
     def enterEvent(self, event):
@@ -753,7 +769,7 @@ class MainWindow(QMainWindow):
         self._build_flash_page()
         self._build_downloads_page()
 
-        self.content_stack.setCurrentWidget(self.loading_page)
+        self._switch_page(self.loading_page)
         main_layout.addWidget(self.content_stack, stretch=1)
 
         central.setLayout(main_layout)
@@ -763,6 +779,27 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._load_devices)
 
     # ===== 侧边栏 =====
+
+    def _switch_page(self, page, nav=None):
+        self.content_stack.setCurrentWidget(page)
+        if hasattr(self, 'nav_devices') and hasattr(self, 'nav_downloads'):
+            self.nav_devices.setChecked(page == self.device_list_page)
+            self.nav_downloads.setChecked(page == self.downloads_page)
+        if nav == 'devices' and hasattr(self, 'nav_devices'):
+            self.nav_devices.setChecked(True)
+            self.nav_downloads.setChecked(False)
+        elif nav == 'downloads' and hasattr(self, 'nav_downloads'):
+            self.nav_devices.setChecked(False)
+            self.nav_downloads.setChecked(True)
+
+
+    def _enable_touch_scroll(self, area):
+        try:
+            # 不在这里改滚动条显示策略；每个页面自己决定显示/隐藏横竖条。
+            # Lomiri 上 TouchGesture 容易刷 QGestureManager warning，保留 LeftMouseButtonGesture 即可。
+            QScroller.grabGesture(area.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
+        except Exception:
+            pass
 
     def _build_sidebar(self):
         widget = QWidget()
@@ -807,7 +844,7 @@ class MainWindow(QMainWindow):
         # Nav items
         self.nav_devices = NavLabel("📱  设备列表", True)
         layout.addWidget(self.nav_devices)
-        self.nav_devices.clicked.connect(lambda: self.content_stack.setCurrentWidget(self.device_list_page))
+        self.nav_devices.clicked.connect(lambda: self._switch_page(self.device_list_page, 'devices'))
 
         self.nav_downloads = NavLabel("⬇️  下载管理", False)
         layout.addWidget(self.nav_downloads)
@@ -890,49 +927,57 @@ class MainWindow(QMainWindow):
             chips_layout.addWidget(chip)
         chips_layout.addStretch()
 
-        layout.addLayout(chips_layout)
+        chip_wrap = QWidget()
+        chip_wrap.setLayout(chips_layout)
+        self.chip_scroll = QScrollArea()
+        self.chip_scroll.setWidgetResizable(True)
+        self.chip_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.chip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.chip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.chip_scroll.setFixedHeight(112)
+        self.chip_scroll.setStyleSheet("""
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:horizontal { height: 0px; width: 0px; }
+            QScrollBar::handle:horizontal { width: 0px; min-width: 0px; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; height: 0; }
+        """)
+        self.chip_scroll.setWidget(chip_wrap)
+        self._enable_touch_scroll(self.chip_scroll)
+        layout.addWidget(self.chip_scroll)
         self.selected_mfr = "All"
 
         # Scrollable device list
         self.device_scroll = QScrollArea()
         self.device_scroll.setWidgetResizable(True)
+        self.device_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.device_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.device_scroll.setStyleSheet("""
-            QScrollArea {{ border: none; background: transparent; }}
-            QScrollBar:vertical {{
-                background: {Theme.BG_DARK};
-                width: 64px;
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical {
+                background: #0f172a;
+                width: 96px;
                 margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
+            }
+            QScrollBar::handle:vertical {
                 background: #334155;
-                min-height: 40px;
-                border-radius: 12px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: #475569;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0;
-            }}
-            QScrollBar:horizontal {{
-                background: {Theme.BG_DARK};
-                height: 64px;
+                min-height: 160px;
+                border-radius: 22px;
+            }
+            QScrollBar::handle:vertical:hover { background: #64748b; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal {
+                background: #0f172a;
+                height: 160px;
                 margin: 0;
-            }}
-            QScrollBar::handle:horizontal {{
+            }
+            QScrollBar::handle:horizontal {
                 background: #334155;
-                min-width: 40px;
-                border-radius: 12px;
-            }}
-            QScrollBar::handle:horizontal:hover {{
-                background: #475569;
-            }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-                width: 0;
-            }}
-        """
-)
-
+                min-width: 320px;
+                border-radius: 32px;
+            }
+            QScrollBar::handle:horizontal:hover { background: #64748b; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+        """)
         self.device_container = QWidget()
         self.device_list_layout = QVBoxLayout()
         self.device_list_layout.setContentsMargins(0, 0, 0, 0)
@@ -940,6 +985,7 @@ class MainWindow(QMainWindow):
         self.device_list_layout.addStretch()
         self.device_container.setLayout(self.device_list_layout)
         self.device_scroll.setWidget(self.device_container)
+        self._enable_touch_scroll(self.device_scroll)
 
         layout.addWidget(self.device_scroll, stretch=1)
         self.device_list_page.setLayout(layout)
@@ -954,7 +1000,7 @@ class MainWindow(QMainWindow):
         # Top bar
         top_bar = QHBoxLayout()
         self.back_btn = SecondaryButton("←  返回")
-        self.back_btn.clicked.connect(lambda: self.content_stack.setCurrentWidget(self.device_list_page))
+        self.back_btn.clicked.connect(lambda: self._switch_page(self.device_list_page, 'devices'))
         top_bar.addWidget(self.back_btn)
 
         self.detail_title = QLabel("")
@@ -969,43 +1015,35 @@ class MainWindow(QMainWindow):
         # Detail content
         self.detail_scroll = QScrollArea()
         self.detail_scroll.setWidgetResizable(True)
+        self.detail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.detail_scroll.setStyleSheet("""
-            QScrollArea {{ border: none; background: transparent; }}
-            QScrollBar:vertical {{
-                background: {Theme.BG_DARK};
-                width: 64px;
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical {
+                background: #0f172a;
+                width: 96px;
                 margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
+            }
+            QScrollBar::handle:vertical {
                 background: #334155;
-                min-height: 40px;
-                border-radius: 12px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: #475569;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0;
-            }}
-            QScrollBar:horizontal {{
-                background: {Theme.BG_DARK};
-                height: 64px;
+                min-height: 160px;
+                border-radius: 22px;
+            }
+            QScrollBar::handle:vertical:hover { background: #64748b; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal {
+                background: #0f172a;
+                height: 160px;
                 margin: 0;
-            }}
-            QScrollBar::handle:horizontal {{
+            }
+            QScrollBar::handle:horizontal {
                 background: #334155;
-                min-width: 40px;
-                border-radius: 12px;
-            }}
-            QScrollBar::handle:horizontal:hover {{
-                background: #475569;
-            }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-                width: 0;
-            }}
-        """
-)
-
+                min-width: 320px;
+                border-radius: 32px;
+            }
+            QScrollBar::handle:horizontal:hover { background: #64748b; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+        """)
         self.detail_container = QWidget()
         self.detail_container_layout = QVBoxLayout()
         self.detail_container_layout.setContentsMargins(0, 16, 0, 0)
@@ -1013,6 +1051,7 @@ class MainWindow(QMainWindow):
         self.detail_container_layout.addStretch()
         self.detail_container.setLayout(self.detail_container_layout)
         self.detail_scroll.setWidget(self.detail_container)
+        self._enable_touch_scroll(self.detail_scroll)
 
         layout.addWidget(self.detail_scroll, stretch=1)
         self.detail_page.setLayout(layout)
@@ -1026,7 +1065,7 @@ class MainWindow(QMainWindow):
 
         top_bar = QHBoxLayout()
         self.flash_back = SecondaryButton("←  返回")
-        self.flash_back.clicked.connect(lambda: self.content_stack.setCurrentWidget(self.detail_page))
+        self.flash_back.clicked.connect(lambda: self._switch_page(self.detail_page))
         top_bar.addWidget(self.flash_back)
 
         self.flash_title = QLabel("")
@@ -1037,43 +1076,35 @@ class MainWindow(QMainWindow):
         # Flash content
         self.flash_scroll = QScrollArea()
         self.flash_scroll.setWidgetResizable(True)
+        self.flash_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.flash_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.flash_scroll.setStyleSheet("""
-            QScrollArea {{ border: none; background: transparent; }}
-            QScrollBar:vertical {{
-                background: {Theme.BG_DARK};
-                width: 64px;
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical {
+                background: #0f172a;
+                width: 96px;
                 margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
+            }
+            QScrollBar::handle:vertical {
                 background: #334155;
-                min-height: 40px;
-                border-radius: 12px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: #475569;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0;
-            }}
-            QScrollBar:horizontal {{
-                background: {Theme.BG_DARK};
-                height: 64px;
+                min-height: 160px;
+                border-radius: 22px;
+            }
+            QScrollBar::handle:vertical:hover { background: #64748b; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal {
+                background: #0f172a;
+                height: 160px;
                 margin: 0;
-            }}
-            QScrollBar::handle:horizontal {{
+            }
+            QScrollBar::handle:horizontal {
                 background: #334155;
-                min-width: 40px;
-                border-radius: 12px;
-            }}
-            QScrollBar::handle:horizontal:hover {{
-                background: #475569;
-            }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-                width: 0;
-            }}
-        """
-)
-
+                min-width: 320px;
+                border-radius: 32px;
+            }
+            QScrollBar::handle:horizontal:hover { background: #64748b; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+        """)
         self.flash_container = QWidget()
         self.flash_container_layout = QVBoxLayout()
         self.flash_container_layout.setContentsMargins(0, 16, 0, 0)
@@ -1081,6 +1112,7 @@ class MainWindow(QMainWindow):
         self.flash_container_layout.addStretch()
         self.flash_container.setLayout(self.flash_container_layout)
         self.flash_scroll.setWidget(self.flash_container)
+        self._enable_touch_scroll(self.flash_scroll)
 
         layout.addWidget(self.flash_scroll, stretch=1)
         self.flash_page.setLayout(layout)
@@ -1089,7 +1121,7 @@ class MainWindow(QMainWindow):
     # ===== 数据加载 =====
 
     def _load_devices(self):
-        self.content_stack.setCurrentWidget(self.loading_page)
+        self._switch_page(self.loading_page)
         self.loading_label.setText("正在加载设备列表...")
         self.loading_sub.setText("连接服务器...")
 
@@ -1106,49 +1138,43 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
         top_bar = QHBoxLayout()
         back_btn = SecondaryButton("\u2190  返回")
-        back_btn.clicked.connect(lambda: self.content_stack.setCurrentWidget(self.device_list_page))
+        back_btn.clicked.connect(lambda: self._switch_page(self.device_list_page, 'devices'))
         top_bar.addWidget(back_btn)
         title = QLabel("已下载设备")
         title.setStyleSheet(f"color: {Theme.TEXT_PRIMARY}; font-size: 62px; font-weight: bold; margin-left: 16px;")
         top_bar.addWidget(title, stretch=1)
         layout.addLayout(top_bar)
         scroll = QScrollArea()
-        scroll.setStyleSheet(f"""
-            QScrollArea {{ border: none; background: transparent; }}
-            QScrollBar:vertical {{
-                background: {Theme.BG_DARK};
-                width: 64px;
+        scroll.setStyleSheet("""
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical {
+                background: #0f172a;
+                width: 96px;
                 margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
+            }
+            QScrollBar::handle:vertical {
                 background: #334155;
-                min-height: 40px;
-                border-radius: 12px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: #475569;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0;
-            }}
-            QScrollBar:horizontal {{
-                background: {Theme.BG_DARK};
-                height: 64px;
+                min-height: 160px;
+                border-radius: 22px;
+            }
+            QScrollBar::handle:vertical:hover { background: #64748b; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal {
+                background: #0f172a;
+                height: 160px;
                 margin: 0;
-            }}
-            QScrollBar::handle:horizontal {{
+            }
+            QScrollBar::handle:horizontal {
                 background: #334155;
-                min-width: 40px;
-                border-radius: 12px;
-            }}
-            QScrollBar::handle:horizontal:hover {{
-                background: #475569;
-            }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-                width: 0;
-            }}
+                min-width: 320px;
+                border-radius: 32px;
+            }
+            QScrollBar::handle:horizontal:hover { background: #64748b; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
         """)
         scroll.setWidgetResizable(True)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         container = QWidget()
         self.dl_mgr_layout = QVBoxLayout()
         self.dl_mgr_layout.setContentsMargins(0, 16, 0, 0)
@@ -1156,6 +1182,7 @@ class MainWindow(QMainWindow):
         self.dl_mgr_layout.addStretch()
         container.setLayout(self.dl_mgr_layout)
         scroll.setWidget(container)
+        self._enable_touch_scroll(scroll)
         layout.addWidget(scroll, stretch=1)
         self.downloads_page.setLayout(layout)
         self.content_stack.addWidget(self.downloads_page)
@@ -1177,7 +1204,7 @@ class MainWindow(QMainWindow):
             card.setStyleSheet(f"""
                 QFrame {{
                     background: {Theme.BG_CARD};
-                    border-radius: 12px;
+                    border-radius: 18px;
                     padding: 24px 32px;
                 }}
             """)
@@ -1193,7 +1220,6 @@ class MainWindow(QMainWindow):
             path_lbl.setStyleSheet(f"color: {Theme.TEXT_SECONDARY}; font-size: 32px;")
             cl.addWidget(path_lbl)
 
-            # Delete button
             btn_row = QHBoxLayout()
             btn_row.setContentsMargins(0, 8, 0, 0)
             del_btn = QPushButton("🗑  删除")
@@ -1231,7 +1257,7 @@ class MainWindow(QMainWindow):
             self.device_list_layout.addWidget(card)
 
     def _on_devices_loaded(self, devices):
-        self.content_stack.setCurrentWidget(self.device_list_page)
+        self._switch_page(self.device_list_page, 'devices')
         self.count_label.setText(f"共 {len(devices)} 款设备")
         self.loading_status.hide()
         self.loading_sub.setText("")
@@ -1313,7 +1339,7 @@ class MainWindow(QMainWindow):
         loading_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.insertWidget(0, loading_lbl)
 
-        self.content_stack.setCurrentWidget(self.detail_page)
+        self._switch_page(self.detail_page)
 
         # Stop any previous thread
         if hasattr(self, 'detail_thread') and self.detail_thread and self.detail_thread.isRunning():
@@ -1350,7 +1376,7 @@ class MainWindow(QMainWindow):
         card.setStyleSheet(f"""
             QFrame {{
                 background: {Theme.BG_CARD};
-                border-radius: 12px;
+                border-radius: 18px;
                 padding: 32px;
             }}
             QFrame:hover {{
@@ -1407,7 +1433,7 @@ class MainWindow(QMainWindow):
                 font-size: 34px;
                 font-weight: bold;
                 padding: 16px 32px;
-                border-radius: 12px;
+                border-radius: 18px;
                 border: none;
             }}
             QPushButton:hover {{
@@ -1450,9 +1476,10 @@ class MainWindow(QMainWindow):
         codename = self.current_device["codename"]
         self._download_codename = codename
         self._current_channel_version = channel.get('desc', '')
+        self._active_download_files = channel["files"]
         dest_dir = os.path.join(DOWNLOAD_DIR, codename)
         self.flash_title.setText(f"下载: {channel['desc']}")
-        self.content_stack.setCurrentWidget(self.flash_page)
+        self._switch_page(self.flash_page)
 
         # 分类目录
         fastboot_dir = os.path.join(dest_dir, f"fastboot-{codename}")
@@ -1547,15 +1574,15 @@ class MainWindow(QMainWindow):
         layout.insertWidget(layout.count() - 1, self._make_widget_from_layout(total_box))
 
         # Show directories
-        dir_info = QLabel(f"📁  文件已分类:")
+        dir_info = QLabel(f"📁  fastboot刷入准备:")
         dir_info.setStyleSheet(f"color: {Theme.TEXT_PRIMARY}; font-size: 36px; padding-top: 16px;")
         layout.insertWidget(layout.count() - 1, dir_info)
 
-        fb_label = QLabel(f"  fastboot-{codename}/  ← boot.img, vbmeta.img")
+        fb_label = QLabel(f"  fastboot-{codename}/  ← 固件文件")
         fb_label.setStyleSheet(f"color: {Theme.ACCENT}; font-size: 32px;")
         layout.insertWidget(layout.count() - 1, fb_label)
 
-        rec_label = QLabel(f"  recovery-{codename}/  ← rootfs, device, 刷机脚本")
+        rec_label = QLabel(f"  recovery-{codename}/  ← 系统镜像、ubuntu_command")
         rec_label.setStyleSheet(f"color: {Theme.ACCENT}; font-size: 32px;")
         layout.insertWidget(layout.count() - 1, rec_label)
 
@@ -1587,11 +1614,11 @@ class MainWindow(QMainWindow):
                     w.download_btn.setEnabled(True)
     def _show_downloads_page(self):
         if hasattr(self, 'dl_worker') and self.dl_worker and self.dl_worker.isRunning():
-            self.content_stack.setCurrentWidget(self.flash_page)
+            self._switch_page(self.flash_page)
             return
         # Refresh downloaded list
         self._refresh_downloads_list()
-        self.content_stack.setCurrentWidget(self.downloads_page)
+        self._switch_page(self.downloads_page, 'downloads')
 
 
     def _make_widget_from_layout(self, layout):
@@ -1604,9 +1631,10 @@ class MainWindow(QMainWindow):
         if bar:
             bar.setValue(pct)
 
-        # Update total
-        total_done = sum(f["size"] for f in self.current_channels[0]["files"] if f.get("completed"))
-        total_all = sum(f["size"] for f in self.current_channels[0]["files"])
+        # Update total from active channel only
+        active = getattr(self, '_active_download_files', self.current_channels[0]["files"] if self.current_channels else [])
+        total_done = sum(f.get("size", 0) for f in active if f.get("completed"))
+        total_all = sum(f.get("size", 0) for f in active)
         if total_all > 0:
             self.total_bar.setValue(int(total_done * 100 / total_all))
             self.total_text.setText(f"{format_size(total_done)} / {format_size(total_all)}")
@@ -1690,7 +1718,7 @@ class MainWindow(QMainWindow):
         layout.insertWidget(layout.count() - 1, open_btn)
 
         back_btn = SecondaryButton("←  返回设备列表")
-        back_btn.clicked.connect(lambda: self.content_stack.setCurrentWidget(self.device_list_page))
+        back_btn.clicked.connect(lambda: self._switch_page(self.device_list_page, 'devices'))
         layout.insertWidget(layout.count() - 1, back_btn)
 
     def _on_dl_error(self, msg):
@@ -1702,26 +1730,30 @@ class MainWindow(QMainWindow):
 
 
     def _delete_download(self, codename, path):
-        from datetime import datetime
-        self.downloaded_devices = [d for d in self.downloaded_devices if d.get("codename") != codename or d.get("path") != path]
-        self._save_downloads_state()
-        self._refresh_downloads_list()
-
+        try:
+            self.downloaded_devices = [d for d in self.downloaded_devices if not (d.get("codename") == codename and d.get("path") == path)]
+            shutil.rmtree(path, ignore_errors=True)
+            self._save_downloads_state()
+            self._refresh_downloads_list()
+        except Exception:
+            pass
 
     def _save_downloads_state(self):
         try:
             os.makedirs(os.path.dirname(DOWNLOADS_STATE), exist_ok=True)
-            with open(DOWNLOADS_STATE, 'w') as f:
-                data = []
-                for d in self.downloaded_devices:
-                    data.append({
-                        "name": d.get("name", ""),
-                        "codename": d.get("codename", ""),
-                        "version": d.get("version", ""),
-                        "time": d.get("time", ""),
-                        "path": d.get("path", ""),
-                    })
-                json.dump(data, f)
+            data = []
+            for d in self.downloaded_devices:
+                data.append({
+                    "name": d.get("name", ""),
+                    "codename": d.get("codename", ""),
+                    "version": d.get("version", ""),
+                    "time": d.get("time", ""),
+                    "path": d.get("path", ""),
+                })
+            tmp_path = DOWNLOADS_STATE + ".tmp"
+            with open(tmp_path, 'w') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, DOWNLOADS_STATE)
         except Exception:
             pass
 
@@ -1730,261 +1762,13 @@ class MainWindow(QMainWindow):
             if os.path.exists(DOWNLOADS_STATE):
                 with open(DOWNLOADS_STATE) as f:
                     data = json.load(f)
-                    self.downloaded_devices = data
+                    if isinstance(data, list):
+                        self.downloaded_devices = data
         except Exception:
-            pass
+            self.downloaded_devices = []
 
-    # 机型 fastboot 固件配置
-DEVICE_FIRMWARE = {
-        "enchilada": {"boot.img", "vbmeta.img"},
-        "fajita": {"boot.img", "vbmeta.img"},
-        "lancelot": {"recovery.img", "dtbo.img", "super.zip", "vbmeta.img"},
-    }
-DEVICE_FIRMWARE_URLS = {
-        "lancelot": [
-            {"name": "recovery.img", "url": "https://github.com/ubuntu-touch-redmi-mt6768/lancelotfw/releases/download/20250217/recovery.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/ubuntu-touch-redmi-mt6768/lancelotfw/releases/download/20250217/dtbo.img", "size": 0},
-            {"name": "super.zip", "url": "https://github.com/ubuntu-touch-redmi-mt6768/lancelotfw/releases/download/20250217/super.zip", "size": 0},
-            {"name": "vbmeta.img", "url": "https://dl.google.com/developers/android/qt/images/gsi/vbmeta.img", "size": 0},
-        ],
-    }
 
-DEVICE_FIRMWARE_URLS = {
-        "FP3": [
-            {"name": "boot.img", "url": "https://gitlab.com/ubports/porting/community-ports/android10/fairphone/fairphone_fp3/-/jobs/2902188165/artifacts/raw/out/boot.img", "size": 0},
-        ],
-        "FP4": [
-            {"name": "boot.img", "url": "https://cdimage.ubports.com/devices/FP4/boot.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://cdimage.ubports.com/devices/FP4/dtbo.img", "size": 0},
-            {"name": "recovery.img", "url": "https://cdimage.ubports.com/devices/FP4/recovery.img", "size": 0},
-        ],
-        "FP5": [
-            {"name": "boot.img", "url": "https://cdimage.ubports.com/devices/FP5/boot.img", "size": 0},
-            {"name": "vendor_boot.img", "url": "https://cdimage.ubports.com/devices/FP5/vendor_boot.img", "size": 0},
-        ],
-        "Spacewar": [
-            {"name": "boot.img", "url": "https://github.com/Nonta72/nothing-spacewar/releases/download/UT-24.02_v12/boot.img", "size": 0},
-            {"name": "vendor_boot.img", "url": "https://github.com/Nonta72/nothing-spacewar/releases/download/UT-24.02_v12/vendor_boot.img", "size": 0},
-        ],
-        "X00TD": [
-            {"name": "vendor_X00TD.zip", "url": "https://github.com/Linux-On-Sdm6Series/android/releases/download/13-09-2021/vendor_X00TD.zip", "size": 0},
-            {"name": "recovery_X00TD.img", "url": "https://github.com/Linux-On-Sdm6Series/android/releases/download/26-10-2021/recovery_X00TD.img", "size": 0},
-            {"name": "firmware_X00TD.zip", "url": "https://github.com/Linux-On-Sdm6Series/android/releases/download/13-09-2021/firmware_X00TD.zip", "size": 0},
-        ],
-        "X605": [
-            {"name": "boot.img", "url": "https://gitlab.com/ubports/porting/community-ports/android9/lenovo-tab-m10-fhd/lenovo-x605/-/jobs/6057055401/artifacts/raw/out/boot.img", "size": 0},
-            {"name": "recovery.img", "url": "https://gitlab.com/ubports/porting/community-ports/android9/lenovo-tab-m10-fhd/lenovo-x605-assets/-/raw/main/recovery.img", "size": 0},
-        ],
-        "algiz": [
-            {"name": "volla-algiz-13.0-ubports-installer-bootstrap.zip", "url": "https://volla.tech/filedump/volla-algiz-13.0-ubports-installer-bootstrap.zip", "size": 0},
-            {"name": "volla-14.0-20241124-stable-BOOTSTRAP-algiz.zip", "url": "https://volla.tech/filedump/vollaos/volla-14.0-20241124-stable-BOOTSTRAP-algiz.zip", "size": 0},
-        ],
-        "amar_row_lte": [
-            {"name": "boot.img", "url": "https://github.com/rubencarneiro/amar_row_lte/releases/download/1.0/boot.img", "size": 0},
-            {"name": "recovery.img", "url": "https://github.com/rubencarneiro/amar_row_lte/releases/download/1.0/recovery.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/rubencarneiro/amar_row_lte/releases/download/1.0/dtbo.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://github.com/rubencarneiro/amar_row_lte/releases/download/1.0/vbmeta.img", "size": 0},
-        ],
-        "amar_row_wifi": [
-            {"name": "boot.img", "url": "https://github.com/rubencarneiro/amar_row_wifi/releases/download/1.0/boot.img", "size": 0},
-            {"name": "recovery.img", "url": "https://github.com/rubencarneiro/amar_row_wifi/releases/download/1.0/recovery.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/rubencarneiro/amar_row_wifi/releases/download/1.0/dtbo.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://github.com/rubencarneiro/amar_row_wifi/releases/download/1.0/vbmeta.img", "size": 0},
-        ],
-        "begonia": [
-            {"name": "fw_begonia_V12.0.8.0.zip", "url": "https://github.com/ubuntu-touch-begonia/ubuntu-touch-begonia/releases/download/20210810/fw_begonia_V12.0.8.0.zip", "size": 0},
-            {"name": "vendor.zip", "url": "https://github.com/ubuntu-touch-begonia/ubuntu-touch-begonia/releases/download/20210810/vendor.zip", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/ubuntu-touch-begonia/ubuntu-touch-begonia/releases/download/20210810/dtbo.img", "size": 0},
-            {"name": "recovery.img", "url": "https://github.com/ubuntu-touch-begonia/ubuntu-touch-begonia/releases/download/20210810/recovery.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://github.com/ubuntu-touch-begonia/ubuntu-touch-begonia/releases/download/20210810/vbmeta.img", "size": 0},
-        ],
-        "billie": [
-            {"name": "boot.img", "url": "https://github.com/rubencarneiro/billie/releases/download/1.0/boot.img", "size": 0},
-            {"name": "recovery.img", "url": "https://github.com/rubencarneiro/billie/releases/download/1.0/recovery.img", "size": 0},
-            {"name": "persist.img", "url": "https://github.com/rubencarneiro/billie/releases/download/1.0/persist.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/rubencarneiro/billie/releases/download/1.0/dtbo.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://github.com/rubencarneiro/billie/releases/download/1.0/vbmeta.img", "size": 0},
-        ],
-        "billie2": [
-            {"name": "boot.img", "url": "https://github.com/rubencarneiro/billie2/releases/download/1.0/boot.img", "size": 0},
-            {"name": "recovery.img", "url": "https://github.com/rubencarneiro/billie2/releases/download/1.0/recovery.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/rubencarneiro/billie2/releases/download/1.0/dtbo.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://github.com/rubencarneiro/billie2/releases/download/1.0/vbmeta.img", "size": 0},
-        ],
-        "cheeseburger": [
-            {"name": "halium-unlocked-recovery_cheeseburger.img", "url": "https://cdimage.ubports.com/devices/dumpling_cheeseburger/halium-unlocked-recovery_cheeseburger.img", "size": 0},
-        ],
-        "citrus": [
-            {"name": "recovery.img", "url": "https://github.com/ubuntu-touch-juice/ubuntu-touch-citrus/releases/download/20210929/recovery.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/ubuntu-touch-juice/ubuntu-touch-citrus/releases/download/20210929/dtbo.img", "size": 0},
-            {"name": "super.zip", "url": "https://github.com/ubuntu-touch-juice/ubuntu-touch-citrus/releases/download/20210929/super.zip", "size": 0},
-            {"name": "vbmeta.img", "url": "https://dl.google.com/developers/android/qt/images/gsi/vbmeta.img", "size": 0},
-        ],
-        "denniz": [
-            {"name": "super.zip", "url": "https://github.com/ubuntu-touch-denniz/ubuntu-touch-denniz/releases/download/20221020/super.zip", "size": 0},
-            {"name": "recovery.img", "url": "https://github.com/ubuntu-touch-denniz/ubuntu-touch-denniz/releases/download/20221020/recovery.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/ubuntu-touch-denniz/ubuntu-touch-denniz/releases/download/20221020/dtbo.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://dl.google.com/developers/android/qt/images/gsi/vbmeta.img", "size": 0},
-        ],
-        "dumpling": [
-            {"name": "halium-unlocked-recovery_dumpling.img", "url": "https://cdimage.ubports.com/devices/dumpling_cheeseburger/halium-unlocked-recovery_dumpling.img", "size": 0},
-        ],
-        "enchilada": [
-            {"name": "boot.img", "url": "https://cdimage.ubports.com/devices/enchilada_fajita/boot.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://cdimage.ubports.com/devices/enchilada_fajita/vbmeta.img", "size": 0},
-        ],
-        "hero2lte": [
-            {"name": "recovery_hero2lte.img", "url": "https://github.com/Kethen/samsung-exynos8890/releases/download/2022-07-23/recovery_hero2lte.img", "size": 0},
-            {"name": "boot-reboot-recovery-hero2lte.img", "url": "https://github.com/Kethen/samsung-exynos8890/releases/download/2022-07-23/boot-reboot-recovery-hero2lte.img", "size": 0},
-        ],
-        "herolte": [
-            {"name": "recovery_herolte.img", "url": "https://github.com/Kethen/samsung-exynos8890/releases/download/2022-07-23/recovery_herolte.img", "size": 0},
-            {"name": "boot-reboot-recovery-herolte.img", "url": "https://github.com/Kethen/samsung-exynos8890/releases/download/2022-07-23/boot-reboot-recovery-herolte.img", "size": 0},
-        ],
-        "jasmine_sprout": [
-            {"name": "boot.img", "url": "https://github.com/ubports-xiaomi-sdm660/artifacts/releases/download/v0.1/boot.img", "size": 0},
-        ],
-        "jingpad_a1": [
-            {"name": "recovery.img", "url": "https://cdimage.ubports.com/devices/jingpad_a1/recovery.img", "size": 0},
-            {"name": "vendor.img", "url": "https://cdimage.ubports.com/devices/jingpad_a1/vendor.img", "size": 0},
-        ],
-        "lancelot": [
-            {"name": "recovery.img", "url": "https://github.com/ubuntu-touch-redmi-mt6768/lancelotfw/releases/download/20250217/recovery.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/ubuntu-touch-redmi-mt6768/lancelotfw/releases/download/20250217/dtbo.img", "size": 0},
-            {"name": "super.zip", "url": "https://github.com/ubuntu-touch-redmi-mt6768/lancelotfw/releases/download/20250217/super.zip", "size": 0},
-            {"name": "vbmeta.img", "url": "https://dl.google.com/developers/android/qt/images/gsi/vbmeta.img", "size": 0},
-        ],
-        "lavender": [
-            {"name": "dtbo.img", "url": "https://cdimage.ubports.com/devices/lavender/dtbo.img", "size": 0},
-            {"name": "recovery.img", "url": "https://cdimage.ubports.com/devices/lavender/recovery.img", "size": 0},
-            {"name": "splash.img", "url": "https://cdimage.ubports.com/devices/lavender/splash.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://cdimage.ubports.com/devices/lavender/vbmeta.img", "size": 0},
-            {"name": "image-fastboot-lavender.zip", "url": "https://images.droidian.org/droidian/nightly/arm64/xiaomi/image-fastboot-lavender.zip", "size": 0},
-            {"name": "droidian-OFFICIAL_xiaomi_lavender-arm64-cutie-phone-28.zip", "url": "https://github.com/cutie-shell/droidian/releases/download/nightly/droidian-OFFICIAL_xiaomi_lavender-arm64-cutie-phone-28.zip", "size": 0},
-        ],
-        "merlin": [
-            {"name": "recovery.img", "url": "https://github.com/ubuntu-touch-redmi-mt6768/ubuntu-touch-merlin/releases/download/20250217/recovery.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/ubuntu-touch-redmi-mt6768/ubuntu-touch-merlin/releases/download/20250217/dtbo.img", "size": 0},
-            {"name": "super.zip", "url": "https://github.com/ubuntu-touch-redmi-mt6768/ubuntu-touch-merlin/releases/download/20250217/super.zip", "size": 0},
-            {"name": "vbmeta.img", "url": "https://dl.google.com/developers/android/qt/images/gsi/vbmeta.img", "size": 0},
-        ],
-        "miatoll": [
-            {"name": "recovery.img", "url": "https://github.com/ubuntu-touch-miatoll/ubuntu-touch-miatoll/releases/download/stable-installer-fix/recovery.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/ubuntu-touch-miatoll/ubuntu-touch-miatoll/releases/download/stable-installer-fix/dtbo.img", "size": 0},
-            {"name": "image-fastboot-miatoll.zip", "url": "https://images.droidian.org/droidian/nightly/arm64/xiaomi/image-fastboot-miatoll.zip", "size": 0},
-            {"name": "droidian-OFFICIAL_xiaomi_miatoll-arm64-cutie-phone-29.zip", "url": "https://github.com/cutie-shell/droidian/releases/download/nightly/droidian-OFFICIAL_xiaomi_miatoll-arm64-cutie-phone-29.zip", "size": 0},
-        ],
-        "mimameid": [
-            {"name": "volla-mimameid-11.0-ubports-installer-bootstrap-v3.zip", "url": "https://volla.tech/filedump/volla-mimameid-11.0-ubports-installer-bootstrap-v3.zip", "size": 0},
-            {"name": "volla-12.1-20240228-stable-BOOTSTRAP-mimameid.zip", "url": "https://volla.tech/filedump/vollaos/volla-12.1-20240228-stable-BOOTSTRAP-mimameid.zip", "size": 0},
-            {"name": "volla-mimameid-12.0-ubports-installer-bootstrap.zip", "url": "https://volla.tech/filedump/volla-mimameid-12.0-ubports-installer-bootstrap.zip", "size": 0},
-            {"name": "twrp-mimameid.img", "url": "https://deb.cutie-shell.org/twrp-mimameid.img", "size": 0},
-            {"name": "image-fastboot-mimameid.zip", "url": "https://images.droidian.org/droidian/nightly/arm64/volla/image-fastboot-mimameid.zip", "size": 0},
-            {"name": "droidian-OFFICIAL_volla_mimameid-arm64-cutie-phone-30.zip", "url": "https://github.com/cutie-shell/droidian/releases/download/nightly/droidian-OFFICIAL_volla_mimameid-arm64-cutie-phone-30.zip", "size": 0},
-        ],
-        "mimameid_h12": [
-            {"name": "volla-mimameid-12.0-ubports-installer-bootstrap.zip", "url": "https://volla.tech/filedump/volla-mimameid-12.0-ubports-installer-bootstrap.zip", "size": 0},
-            {"name": "volla-12.1-20240228-stable-BOOTSTRAP-mimameid.zip", "url": "https://volla.tech/filedump/vollaos/volla-12.1-20240228-stable-BOOTSTRAP-mimameid.zip", "size": 0},
-        ],
-        "mimir": [
-            {"name": "volla-mimir-13.0-ubports-installer-bootstrap.zip", "url": "https://volla.tech/filedump/volla-mimir-13.0-ubports-installer-bootstrap.zip", "size": 0},
-            {"name": "volla-14.0-20250130-stable-BOOTSTRAP-mimir.zip", "url": "https://volla.tech/filedump/vollaos/volla-14.0-20250130-stable-BOOTSTRAP-mimir.zip", "size": 0},
-        ],
-        "pro1x": [
-            {"name": "recovery.img", "url": "https://cdimage.ubports.com/devices/pro1x/recovery.img", "size": 0},
-        ],
-        "r1": [
-            {"name": "super.zip", "url": "https://github.com/MinatiScape/ubtouch-on-r1/releases/download/v0.2/super.zip", "size": 0},
-            {"name": "boot.img", "url": "https://github.com/MinatiScape/ubtouch-on-r1/releases/download/v0.2/boot.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://dl.google.com/developers/android/qt/images/gsi/vbmeta.img", "size": 0},
-        ],
-        "sagit": [
-            {"name": "vendor.zip", "url": "https://github.com/UbuntuTouch-sagit/ubuntu-touch-sagit/releases/download/v1.1/vendor.zip", "size": 0},
-            {"name": "recovery.img", "url": "https://github.com/UbuntuTouch-sagit/ubuntu-touch-sagit/releases/download/v1.1/recovery.img", "size": 0},
-        ],
-        "sargo": [
-            {"name": "boot.img", "url": "https://cdimage.ubports.com/devices/sargo/boot.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://cdimage.ubports.com/devices/sargo/dtbo.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://cdimage.ubports.com/devices/sargo/vbmeta.img", "size": 0},
-            {"name": "image-fastboot-sargo.zip", "url": "https://images.droidian.org/droidian/nightly/arm64/google/image-fastboot-sargo.zip", "size": 0},
-            {"name": "droidian-OFFICIAL_google_sargo-arm64-cutie-phone-28.zip", "url": "https://github.com/cutie-shell/droidian/releases/download/nightly/droidian-OFFICIAL_google_sargo-arm64-cutie-phone-28.zip", "size": 0},
-        ],
-        "surya": [
-            {"name": "recovery.img", "url": "https://github.com/ubuntu-touch-surya/ubuntu-touch-surya/releases/download/stable-repartition/recovery.img", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/ubuntu-touch-surya/ubuntu-touch-surya/releases/download/stable-repartition/dtbo.img", "size": 0},
-            {"name": "super.img", "url": "https://github.com/ubuntu-touch-surya/ubuntu-touch-surya/releases/download/stable-repartition/super.img", "size": 0},
-            {"name": "vendor.img", "url": "https://github.com/ubuntu-touch-surya/ubuntu-touch-surya/releases/download/stable-repartition/vendor.img", "size": 0},
-        ],
-        "vidofnir_esim": [
-            {"name": "volla-vidofnir-12.0-ubports-installer-bootstrap-v3.zip", "url": "https://volla.tech/filedump/volla-vidofnir-12.0-ubports-installer-bootstrap-v3.zip", "size": 0},
-            {"name": "volla-14.0-20250128-stable-BOOTSTRAP-vidofnir.zip", "url": "https://volla.tech/filedump/vollaos/volla-14.0-20250128-stable-BOOTSTRAP-vidofnir.zip", "size": 0},
-        ],
-        "violet": [
-            {"name": "splash.img", "url": "https://gitlab.com/ubports/community-ports/android9/xiaomi-redmi-note-7-pro/xiaomi-violet/-/jobs/artifacts/master/raw/out/splash.img?job=devel-flashable", "size": 0},
-            {"name": "recovery.img", "url": "https://gitlab.com/ubports/community-ports/android9/xiaomi-redmi-note-7-pro/xiaomi-violet/-/jobs/artifacts/master/raw/out/recovery.img?job=devel-flashable", "size": 0},
-            {"name": "vendor.zip", "url": "https://github.com/ubuntu-touch-violet/ubuntu-touch-violet/releases/download/20210510/vendor.zip", "size": 0},
-            {"name": "dtbo.img", "url": "https://github.com/ubuntu-touch-violet/ubuntu-touch-violet/releases/download/20210510/dtbo.img", "size": 0},
-            {"name": "dsp.img", "url": "https://github.com/ubuntu-touch-violet/ubuntu-touch-violet/releases/download/20210510/dsp.img", "size": 0},
-            {"name": "bluetooth.img", "url": "https://github.com/ubuntu-touch-violet/ubuntu-touch-violet/releases/download/20210510/bluetooth.img", "size": 0},
-            {"name": "modem.img", "url": "https://github.com/ubuntu-touch-violet/ubuntu-touch-violet/releases/download/20210510/modem.img", "size": 0},
-            {"name": "vbmeta.img", "url": "https://github.com/ubuntu-touch-violet/ubuntu-touch-violet/releases/download/20210510/vbmeta.img", "size": 0},
-        ],
-        "yggdrasil": [
-            {"name": "halium-unlocked-recovery_yggdrasil.img", "url": "https://cdimage.ubports.com/devices/halium-unlocked-recovery_yggdrasil.img", "size": 0},
-            {"name": "volla-yggdrasil-9.0-ubports-installer-bootstrap.zip", "url": "https://volla.tech/filedump/volla-yggdrasil-9.0-ubports-installer-bootstrap.zip", "size": 0},
-            {"name": "volla-12.1-20240228-stable-BOOTSTRAP-yggdrasil.zip", "url": "https://volla.tech/filedump/vollaos/volla-12.1-20240228-stable-BOOTSTRAP-yggdrasil.zip", "size": 0},
-            {"name": "volla-yggdrasil-10.0-ubports-installer-bootstrap.zip", "url": "https://volla.tech/filedump/volla-yggdrasil-10.0-ubports-installer-bootstrap.zip", "size": 0},
-            {"name": "volla-yggdrasil-10.0-system.zip", "url": "https://volla.tech/filedump/vollaos/volla-yggdrasil-10.0-system.zip", "size": 0},
-            {"name": "image-fastboot-yggdrasil.zip", "url": "https://images.droidian.org/droidian/nightly/arm64/volla/image-fastboot-yggdrasil.zip", "size": 0},
-            {"name": "droidian-OFFICIAL_volla_yggdrasil-arm64-cutie-phone-28.zip", "url": "https://github.com/cutie-shell/droidian/releases/download/nightly/droidian-OFFICIAL_volla_yggdrasil-arm64-cutie-phone-28.zip", "size": 0},
-        ],
-        "yggdrasilx": [
-            {"name": "volla-yggdrasilx-10.0-ubports-installer-bootstrap.zip", "url": "https://volla.tech/filedump/volla-yggdrasilx-10.0-ubports-installer-bootstrap.zip", "size": 0},
-            {"name": "volla-12.1-20240229-stable-BOOTSTRAP-yggdrasilx.zip", "url": "https://volla.tech/filedump/vollaos/volla-12.1-20240229-stable-BOOTSTRAP-yggdrasilx.zip", "size": 0},
-            {"name": "volla-10.1-20211002-SFOS-BOOTSTRAP-yggdrasilx.zip", "url": "https://volla.tech/filedump/vollaos/volla-10.1-20211002-SFOS-BOOTSTRAP-yggdrasilx.zip", "size": 0},
-            {"name": "vollaos-10.1-ygdrassilx-preloader.bin", "url": "https://volla.tech/filedump/vollaos-10.1-ygdrassilx-preloader.bin", "size": 0},
-        ],
-    }
 
-DEVICE_FIRMWARE = {
-        "FP3": {"boot.img"},
-        "FP4": {"boot.img", "dtbo.img", "recovery.img"},
-        "FP5": {"boot.img", "vendor_boot.img"},
-        "Spacewar": {"boot.img", "vendor_boot.img"},
-        "X00TD": {"vendor_X00TD.zip", "recovery_X00TD.img", "firmware_X00TD.zip"},
-        "X605": {"boot.img", "recovery.img"},
-        "algiz": {"volla-algiz-13.0-ubports-installer-bootstrap.zip", "volla-14.0-20241124-stable-BOOTSTRAP-algiz.zip"},
-        "amar_row_lte": {"boot.img", "recovery.img", "dtbo.img", "vbmeta.img"},
-        "amar_row_wifi": {"boot.img", "recovery.img", "dtbo.img", "vbmeta.img"},
-        "begonia": {"fw_begonia_V12.0.8.0.zip", "vendor.zip", "dtbo.img", "recovery.img", "vbmeta.img"},
-        "billie": {"boot.img", "recovery.img", "persist.img", "dtbo.img", "vbmeta.img"},
-        "billie2": {"boot.img", "recovery.img", "dtbo.img", "vbmeta.img"},
-        "cheeseburger": {"halium-unlocked-recovery_cheeseburger.img"},
-        "citrus": {"recovery.img", "dtbo.img", "super.zip", "vbmeta.img"},
-        "denniz": {"super.zip", "recovery.img", "dtbo.img", "vbmeta.img"},
-        "dumpling": {"halium-unlocked-recovery_dumpling.img"},
-        "enchilada": {"boot.img", "vbmeta.img"},
-        "hero2lte": {"recovery_hero2lte.img", "boot-reboot-recovery-hero2lte.img"},
-        "herolte": {"recovery_herolte.img", "boot-reboot-recovery-herolte.img"},
-        "jasmine_sprout": {"boot.img"},
-        "jingpad_a1": {"recovery.img", "vendor.img"},
-        "lancelot": {"recovery.img", "dtbo.img", "super.zip", "vbmeta.img"},
-        "lavender": {"dtbo.img", "recovery.img", "splash.img", "vbmeta.img", "image-fastboot-lavender.zip", "droidian-OFFICIAL_xiaomi_lavender-arm64-cutie-phone-28.zip"},
-        "merlin": {"recovery.img", "dtbo.img", "super.zip", "vbmeta.img"},
-        "miatoll": {"recovery.img", "dtbo.img", "image-fastboot-miatoll.zip", "droidian-OFFICIAL_xiaomi_miatoll-arm64-cutie-phone-29.zip"},
-        "mimameid": {"volla-mimameid-11.0-ubports-installer-bootstrap-v3.zip", "volla-12.1-20240228-stable-BOOTSTRAP-mimameid.zip", "volla-mimameid-12.0-ubports-installer-bootstrap.zip", "twrp-mimameid.img", "image-fastboot-mimameid.zip", "droidian-OFFICIAL_volla_mimameid-arm64-cutie-phone-30.zip"},
-        "mimameid_h12": {"volla-mimameid-12.0-ubports-installer-bootstrap.zip", "volla-12.1-20240228-stable-BOOTSTRAP-mimameid.zip"},
-        "mimir": {"volla-mimir-13.0-ubports-installer-bootstrap.zip", "volla-14.0-20250130-stable-BOOTSTRAP-mimir.zip"},
-        "pro1x": {"recovery.img"},
-        "r1": {"super.zip", "boot.img", "vbmeta.img"},
-        "sagit": {"vendor.zip", "recovery.img"},
-        "sargo": {"boot.img", "dtbo.img", "vbmeta.img", "image-fastboot-sargo.zip", "droidian-OFFICIAL_google_sargo-arm64-cutie-phone-28.zip"},
-        "surya": {"recovery.img", "dtbo.img", "super.img", "vendor.img"},
-        "vidofnir_esim": {"volla-vidofnir-12.0-ubports-installer-bootstrap-v3.zip", "volla-14.0-20250128-stable-BOOTSTRAP-vidofnir.zip"},
-        "violet": {"splash.img", "recovery.img", "vendor.zip", "dtbo.img", "dsp.img", "bluetooth.img", "modem.img", "vbmeta.img"},
-        "yggdrasil": {"halium-unlocked-recovery_yggdrasil.img", "volla-yggdrasil-9.0-ubports-installer-bootstrap.zip", "volla-12.1-20240228-stable-BOOTSTRAP-yggdrasil.zip", "volla-yggdrasil-10.0-ubports-installer-bootstrap.zip", "volla-yggdrasil-10.0-system.zip", "image-fastboot-yggdrasil.zip", "droidian-OFFICIAL_volla_yggdrasil-arm64-cutie-phone-28.zip"},
-        "yggdrasilx": {"volla-yggdrasilx-10.0-ubports-installer-bootstrap.zip", "volla-12.1-20240229-stable-BOOTSTRAP-yggdrasilx.zip", "volla-10.1-20211002-SFOS-BOOTSTRAP-yggdrasilx.zip", "vollaos-10.1-ygdrassilx-preloader.bin"},
-    }
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
