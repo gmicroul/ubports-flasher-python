@@ -746,23 +746,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(subtitle2)
 
         # Nav items
-        self.nav_devices = QLabel("📱  设备列表")
-        self.nav_devices.setStyleSheet(f"""
-            color: {Theme.TEXT_PRIMARY};
-            background: {Theme.ACCENT_LIGHT};
-            padding: 24px 40px;
-            font-size: 32px;
-            border-left: 3px solid {Theme.ACCENT};
-        """)
+        self.nav_devices = NavLabel("📱  设备列表", True)
         layout.addWidget(self.nav_devices)
+        self.nav_devices.clicked.connect(lambda: self.content_stack.setCurrentWidget(self.device_list_page))
 
-        self.nav_downloads = QLabel("⬇️  下载管理")
-        self.nav_downloads.setStyleSheet(f"""
-            color: {Theme.TEXT_SECONDARY};
-            padding: 24px 40px;
-            font-size: 32px;
-        """)
+        self.nav_downloads = NavLabel("⬇️  下载管理", False)
         layout.addWidget(self.nav_downloads)
+        self.nav_downloads.clicked.connect(self._show_downloads_page)
 
         # Spacer
         layout.addStretch()
@@ -841,7 +831,7 @@ class MainWindow(QMainWindow):
             QScrollArea {{ border: none; background: transparent; }}
             QScrollBar:horizontal {{
                 background: {Theme.BG_DARK};
-                height: 24px;
+                height: 48px;
                 margin: 0;
             }}
             QScrollBar::handle:horizontal {{
@@ -897,7 +887,7 @@ class MainWindow(QMainWindow):
             QScrollArea {{ border: none; background: transparent; }}
             QScrollBar:vertical {{
                 background: {Theme.BG_DARK};
-                width: 24px;
+                width: 48px;
                 margin: 0;
             }}
             QScrollBar::handle:vertical {{
@@ -948,7 +938,7 @@ class MainWindow(QMainWindow):
             QScrollArea {{ border: none; background: transparent; }}
             QScrollBar:vertical {{
                 background: {Theme.BG_DARK};
-                width: 24px;
+                width: 48px;
                 margin: 0;
             }}
             QScrollBar::handle:vertical {{
@@ -1344,6 +1334,12 @@ class MainWindow(QMainWindow):
                     w.cancel_btn.hide()
                 if hasattr(w, 'download_btn') and w.download_btn:
                     w.download_btn.setEnabled(True)
+    def _show_downloads_page(self):
+        if hasattr(self, 'dl_worker') and self.dl_worker and self.dl_worker.isRunning():
+            self.content_stack.setCurrentWidget(self.flash_page)
+            return
+        self.content_stack.setCurrentWidget(self.device_list_page)
+
 
     def _make_widget_from_layout(self, layout):
         w = QWidget()
