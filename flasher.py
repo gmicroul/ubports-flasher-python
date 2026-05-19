@@ -1192,29 +1192,6 @@ class MainWindow(QMainWindow):
             path_lbl = QLabel(f"📁  {d['path']}")
             path_lbl.setStyleSheet(f"color: {Theme.TEXT_SECONDARY}; font-size: 32px;")
             cl.addWidget(path_lbl)
-
-            # Delete button
-            btn_row = QHBoxLayout()
-            btn_row.setContentsMargins(0, 8, 0, 0)
-            del_btn = QPushButton("🗑  删除")
-            del_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: {Theme.RED};
-                    color: white;
-                    font-size: 28px;
-                    padding: 8px 24px;
-                    border-radius: 8px;
-                    border: none;
-                }}
-                QPushButton:hover {{
-                    background: #dc2626;
-                }}
-            """)
-            del_btn.clicked.connect(lambda checked, cd=d["codename"], p=d["path"]: self._delete_download(cd, p))
-            btn_row.addStretch()
-            btn_row.addWidget(del_btn)
-            cl.addLayout(btn_row)
-
             card.setLayout(cl)
             layout.insertWidget(layout.count() - 1, card)
 
@@ -1664,7 +1641,31 @@ class MainWindow(QMainWindow):
                 else:
                     f.write(f"update {fn}\n")
             f.write("unmount system\n")
-        
+        # Generate flash-ubports.sh for TWRP
+        flash_sh_path = os.path.join(recovery_dir, "flash-ubports.sh")
+        sh_script = f"""#!/sbin/sh
+# UBports Offline Flasher - {codename}
+set -e
+DIR=$(dirname "$0" 2>/dev/null)
+[ -d "$DIR" ] || DIR="/usbstorage"
+[ -d "$DIR" ] || DIR="/usb_otg"
+[ -d "$DIR" ] || DIR="/sdcard"
+
+echo "Flashing {codename}..."
+# Fastboot 分区文件在上级目录
+FASTBOOT_DIR="$DIR/fastboot-{codename}"
+if [ -f "$FASTBOOT_DIR/boot.img" ]; then
+    SLOT=$(getprop ro.boot.slot_suffix)
+    dd if="$FASTBOOT_DIR/boot.img" of="/dev/block/bootdevice/by-name/boot$SLOT" bs=1M
+fi
+if [ -f "$FASTBOOT_DIR/vbmeta.img" ]; then
+    dd if="$FASTBOOT_DIR/vbmeta.img" of="/dev/block/bootdevice/by-name/vbmeta$SLOT" bs=1M
+fi
+echo "Done! Reboot now."
+"""
+        with open(flash_sh_path, 'w') as f:
+            f.write(sh_script)
+        os.chmod(flash_sh_path, 0o755)
         layout = self.flash_container_layout
         while layout.count() > 1:
             item = layout.takeAt(0)
@@ -1699,13 +1700,6 @@ class MainWindow(QMainWindow):
         if self._current_dl_btn:
             self._current_dl_btn.setEnabled(True)
         self._hide_all_cancel_btns()
-
-
-    def _delete_download(self, codename, path):
-        from datetime import datetime
-        self.downloaded_devices = [d for d in self.downloaded_devices if d.get("codename") != codename or d.get("path") != path]
-        self._save_downloads_state()
-        self._refresh_downloads_list()
 
 
     def _save_downloads_state(self):
